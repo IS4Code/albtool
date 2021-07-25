@@ -30,7 +30,7 @@ namespace albtool
 		
 		private void Load(string input)
 		{
-			using(FileStream stream = new FileStream(input, FileMode.Open))
+			using(var stream = Program.OpenStream(input))
 			{
 				string ext = Path.GetExtension(input);
 				const StringComparison cmp = StringComparison.CurrentCultureIgnoreCase;

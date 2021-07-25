@@ -1,43 +1,62 @@
-﻿using System;
+﻿using AlbLib;
+using AlbLib.XLD;
+using System;
 using System.Collections.Generic;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
-using AlbLib;
-using AlbLib.Imaging;
-using AlbLib.Texts;
-using AlbLib.XLD;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Web.Script.Serialization;
 
 namespace albtool
 {
-	class Program
+    class Program
 	{
 		static Program()
 		{
+            Thread.CurrentThread.CurrentCulture = Thread.CurrentThread.CurrentUICulture = CultureInfo.DefaultThreadCurrentCulture = CultureInfo.DefaultThreadCurrentUICulture = CultureInfo.InvariantCulture;
 			AppDomain.CurrentDomain.AssemblyResolve += AssemblyResolve;
-		}
+            WebRequest.DefaultWebProxy = null;
+            ServicePointManager.Expect100Continue = true;
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls11 | SecurityProtocolType.Tls12;
+            ServicePointManager.ServerCertificateValidationCallback = delegate { return true; };
+        }
 		
 		public static void Main(string[] args)
 		{
-			//args = new[]{"-e", "-f", "xlp", "3DBCKGR0.XLD:2", "patch.xlp"};
-			//args = new[]{"-i", "-f", "xlp", "patch.xlp", "test.XLz"};
-			
-			
-			Paths.SetXLDLIBS("./");
-			Console.WriteLine("albtool (2015) by IllidanS4, version "+Assembly.GetExecutingAssembly().GetName().Version);
+            MainAsync(args).Wait();
+        }
+
+        public static async Task MainAsync(string[] args)
+        {
+            Paths.SetXLDLIBS("./");
+            var aname = Assembly.GetExecutingAssembly().GetName();
+            Console.WriteLine("albtool (2015-2021) by IllidanS4, version " + aname.Version);
+            try
+            {
+                await ProcessArguments(args);
+            }catch(Exception e)
+            {
+                Console.WriteLine("Error: " + e.Message);
+            }
+        }
+
+        public static async Task ProcessArguments(string[] args)
+        {
 			if(args.Length == 0)
 			{
 				Console.WriteLine("Use --help to show the list of commands.");
 				return;
 			}
 			try{
-				if(args.Length >= 3)
+				if(args.Length >= 2)
 				{
 					RenderInfo info = new RenderInfo();
 					string action = null;
@@ -48,7 +67,7 @@ namespace albtool
 						string arg = args[i];
 						switch(arg)
 						{
-							case "-c":case "-e":case "-i":case "-m":case "-v":
+							case "-c":case "-e":case "-i":case "-m":case "-v":case "-mod":
 								if(action != null)
 								{
 									Console.WriteLine("Action already specified.");
@@ -115,7 +134,10 @@ namespace albtool
 							UpdateVersion("albion.exe", ver, date);
 							UpdateVersion("sr-main.exe", ver, date);
 							return;
-					}
+                        case "-mod":case "/mod":
+                            await InstallMod(input);
+                            return;
+                    }
 					
 					short[] insubfiles = ExtractSubfiles(ref input);
 					short[] outsubfiles = ExtractSubfiles(ref output);
@@ -148,13 +170,13 @@ namespace albtool
 								}else{
 									data = new byte[0];
 								}
-								/*using(var stream = new FileStream(input, FileMode.Open))
+                                /*using(var stream = OpenStream(input))
 								{
 									XLDPatchSubfile pat = new XLDPatchSubfile(new BinaryReader(stream), (int)stream.Length);
 									pat.ModifyBytes(ref data);
 								}
 								File.WriteAllBytes(output, data);*/
-								XLDPatch pat = new XLDPatch(input);
+                                XLDPatch pat = new XLDPatch(input);
 								foreach(var sub in pat.Subfiles)
 								{
 									sub.ModifyBytes(ref data);
@@ -261,7 +283,7 @@ namespace albtool
 				switch(args.Single())
 				{
 					case "--help":case "-?":case "/?":
-						Console.WriteLine("Usage: albtool [-c/e/i [other options] <input> <output> | -lf | -v <version> <created>]");
+						Console.WriteLine("Usage: albtool [-c/e/i [other options] <input> <output> | -lf | -v <version> <created> | -mod <id>]");
 						Console.WriteLine();
 						Console.WriteLine("Options:");
 						Console.WriteLine("  -c  Converts a file between Albion and common format.");
@@ -296,8 +318,138 @@ namespace albtool
 				return;
 			}
 		}
-		
-		private static void UpdateVersion(string file, Version ver, DateTime created)
+
+        static readonly HttpClient httpClient = new HttpClient();
+        static readonly JavaScriptSerializer json = new JavaScriptSerializer();
+
+        static ZipArchive inputArchive;
+
+        public static Stream OpenStream(string file)
+        {
+            if(inputArchive == null)
+            {
+                return new FileStream(file, FileMode.Open);
+            }
+            var entry = inputArchive.GetEntry(file);
+            if(entry == null)
+            {
+                throw new ApplicationException($"Input file {file} is missing in the archive!");
+            }
+            return entry.Open();
+        }
+
+        static async Task InstallMod(string id)
+        {
+            if(!Int32.TryParse(id, out _))
+            {
+                Console.WriteLine("Invalid mod id.");
+                return;
+            }
+            Console.WriteLine("Downloading mod info...");
+            var uri = $"https://api.mod.io/v1/games/2558/mods/{id}?api_key=460e70d5c5e723ab9b3fb3fd38a3fcd5";
+            var info = await httpClient.GetStringAsync(uri);
+            var data = json.Deserialize<Dictionary<string, dynamic>>(info);
+            Console.WriteLine(data["name"] as string);
+            var file = (Dictionary<string, dynamic>)data["modfile"];
+            Console.WriteLine($"Downloading {file["filename"] as string}...");
+            var downloadUri = file["download"]["binary_url"] as string;
+            using(var archive = new ZipArchive(await httpClient.GetStreamAsync(downloadUri)))
+            {
+                var old = inputArchive;
+                try
+                {
+                    inputArchive = archive;
+                    var install = archive.GetEntry("__install.txt");
+                    if(install == null)
+                    {
+                        Console.WriteLine("Installation file is missing!");
+                        return;
+                    }
+                    using(var installInfo = install.Open())
+                    {
+                        var reader = new StreamReader(installInfo);
+                        string line;
+                        while((line = reader.ReadLine()) != null)
+                        {
+                            if(String.IsNullOrWhiteSpace(line))
+                            {
+                                continue;
+                            }
+                            if(line.StartsWith("#"))
+                            {
+                                continue;
+                            }
+                            Console.WriteLine(line);
+                            var args = ParseText(line, ' ', '"').ToArray();
+                            await ProcessArguments(args);
+                        }
+                    }
+                } finally
+                {
+                    inputArchive = old;
+                }
+            }
+        }
+
+        public static IEnumerable<String> ParseText(String line, Char delimiter, Char textQualifier)
+        {
+
+            if(line == null)
+                yield break;
+
+            else
+            {
+                Char prevChar = '\0';
+                Char nextChar = '\0';
+                Char currentChar = '\0';
+
+                Boolean inString = false;
+
+                StringBuilder token = new StringBuilder();
+
+                for(int i = 0; i < line.Length; i++)
+                {
+                    currentChar = line[i];
+
+                    if(i > 0)
+                        prevChar = line[i - 1];
+                    else
+                        prevChar = '\0';
+
+                    if(i + 1 < line.Length)
+                        nextChar = line[i + 1];
+                    else
+                        nextChar = '\0';
+
+                    if(currentChar == textQualifier && (prevChar == '\0' || prevChar == delimiter) && !inString)
+                    {
+                        inString = true;
+                        continue;
+                    }
+
+                    if(currentChar == textQualifier && (nextChar == '\0' || nextChar == delimiter) && inString)
+                    {
+                        inString = false;
+                        continue;
+                    }
+
+                    if(currentChar == delimiter && !inString)
+                    {
+                        yield return token.ToString();
+                        token = token.Remove(0, token.Length);
+                        continue;
+                    }
+
+                    token = token.Append(currentChar);
+
+                }
+
+                yield return token.ToString();
+
+            }
+        }
+
+        private static void UpdateVersion(string file, Version ver, DateTime created)
 		{
 			if(!File.Exists(file)) return;
 			const string find = "v%u.%02u";
